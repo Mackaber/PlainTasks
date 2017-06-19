@@ -591,7 +591,7 @@ class PlainTasksOpenLinkCommand(sublime_plugin.TextCommand):
                 subdirs = [f for f in subdirs if os.path.join(root, f) not in seen_folders]
 
                 tname = '%s at %s' % (fn, root)
-                self.thread.tname = tname if ST3 else tname.encode('utf8')
+                self.thread.name = tname if ST3 else tname.encode('utf8')
 
                 name = os.path.normpath(os.path.abspath(os.path.join(root, fn)))
                 if os.path.isfile(name):
