@@ -546,11 +546,18 @@ class PlainTasksOpenLinkCommand(sublime_plugin.TextCommand):
             return [res[0], "line: %d column: %d" % (int(res[1]), int(res[2]))]
         elif res[3] == 'd':
             return [res[0], 'Add folder to project' if ST3 else 'Folders are supported only in Sublime 3']
+        else:
+            return [res[0], res[1]]
 
-    def _on_panel_selection(self, selection):
+    def _on_panel_selection(self, selection, text=None, line=0):
         if selection >= 0:
-            res = self._current_res[selection]
+            self.stop_thread = True
+            self.thread.join()
             win = sublime.active_window()
+            win.run_command('hide_overlay')
+            res = self._current_res[selection]
+            if not res[3]:
+                return  # user chose to stop search
             if not ST3 and res[3] == "d":
                 return sublime.status_message('Folders are supported only in Sublime 3')
             elif res[3] == "d":
@@ -565,41 +572,101 @@ class PlainTasksOpenLinkCommand(sublime_plugin.TextCommand):
             else:
                 self.opened_file = win.open_file('%s:%s:%s' % res[:3],
                                                  sublime.ENCODED_POSITION)
+                if text:
+                    sublime.set_timeout(lambda: self.find_text(self.opened_file, text, line), 300)
 
-    def show_panel_or_open(self, fn, sym, line, col, text):
-        win = sublime.active_window()
-        self._current_res = list()
+    def show_panel_or_open(self, all_folders, fn, sym, line, col, text):
+        fn = fn.replace('/', os.sep)
+        seen_folders = []
+
+        for folder in sorted(set(all_folders)):
+            for root, subdirs, _ in os.walk(folder):
+                if self.stop_thread:
+                    return
+
+                if root in seen_folders:
+                    continue
+                else:
+                    seen_folders.append(root)
+                subdirs = [f for f in subdirs if os.path.join(root, f) not in seen_folders]
+
+                tname = '%s at %s' % (fn, root)
+                self.thread.tname = tname if ST3 else tname.encode('utf8')
+
+                name = os.path.normpath(os.path.abspath(os.path.join(root, fn)))
+                if os.path.isfile(name):
+                    self._current_res.append((name, line or 0, col or 0, "f"))
+                if os.path.isdir(name):
+                    self._current_res.append((name, 0, 0, "d"))
+
+        if os.path.isfile(fn):  # check for full path
+            self._current_res.append((fn, line or 0, col or 0, "f"))
+        elif os.path.isdir(fn):
+            self._current_res.append((fn, 0, 0, "d"))
+
+        self._current_res = self._current_res[1:]  # remove 'Stop search' item
+        if not self._current_res:
+            return sublime.error_message('File was not found\n\n\t%s' % fn)
+        if len(self._current_res) == 1:
+            print(1)
+            sublime.set_timeout(lambda: self._on_panel_selection(0), 1)
+        else:
+            entries = [self._format_res(res) for res in self._current_res]
+            sublime.set_timeout(lambda: self.window.show_quick_panel(entries, lambda i: self._on_panel_selection(i, text=text, line=line)), 1)
+
+    def run(self, edit, fn=None):
+        if hasattr(self, 'thread'):
+            if self.thread.is_alive:
+                self.stop_thread = True
+                self.thread.join()
+        point = self.view.sel()[0].begin()
+        line = self.view.substr(self.view.line(point))
+        fn, sym, line, col, text = self.parse_link(line)
+        if not fn:
+            sublime.status_message('Line does not contain a valid link to file')
+            return
+
+        self.window = win = sublime.active_window()
+        self._current_res = [('Stop search', 'Esc to refresh list while search is running', '', '')]
         if sym:
             for name, _, pos in win.lookup_symbol_in_index(sym):
                 if name.endswith(fn):
                     line, col = pos
                     self._current_res.append((name, line, col, "f"))
-        else:
-            fn = fn.replace('/', os.sep)
-            all_folders = win.folders() + [os.path.dirname(v.file_name()) for v in win.views() if v.file_name()]
-            for folder in set(all_folders):
-                for root, _, _ in os.walk(folder):
-                    name = os.path.abspath(os.path.join(root, fn))
-                    if os.path.isfile(name):
-                        self._current_res.append((name, line or 0, col or 0, "f"))
-                    if os.path.isdir(name):
-                        self._current_res.append((name, 0, 0, "d"))
-            if os.path.isfile(fn):  # check for full path
-                self._current_res.append((fn, line or 0, col or 0, "f"))
-            elif os.path.isdir(fn):
-                self._current_res.append((fn, 0, 0, "d"))
-            self._current_res = list(set(self._current_res))
-        if not self._current_res:
-            sublime.error_message('File was not found\n\n\t%s' % fn)
-        if len(self._current_res) == 1:
-            self._on_panel_selection(0)
-        else:
-            entries = [self._format_res(res) for res in self._current_res]
-            win.show_quick_panel(entries, self._on_panel_selection)
+        import threading
+        all_folders = win.folders() + [os.path.dirname(v.file_name()) for v in win.views() if v.file_name()]
+        self.stop_thread = False
+        self.thread = threading.Thread(target=self.show_panel_or_open, args=(all_folders, fn, sym, line, col, text))
+        self.thread.setName('is starting')
+        self.thread.start()
+        self.progress_bar()
 
-    def run(self, edit, fn=None):
-        point = self.view.sel()[0].begin()
-        line = self.view.substr(self.view.line(point))
+    def find_text(self, view, text, line):
+        result = view.find(text, view.sel()[0].a if line else 0, sublime.LITERAL)
+        view.sel().clear()
+        view.sel().add(result.a)
+        view.set_viewport_position(view.text_to_layout(view.size()), False)
+        view.show_at_center(result)
+
+    def progress_bar(self, i=0, dir=1):
+        if not self.thread.is_alive():
+            PlainTasksStatsStatus.set_stats(self.view)
+            return
+        # This animates a little activity indicator in the status area
+        before = i % 8
+        after = (7) - before
+        if not after:  dir = -1
+        if not before: dir = 1
+        i += dir
+        self.view.set_status('PlainTasks', u'Please wait%s…%ssearching %s' %
+                             (' ' * before, ' ' * after, self.thread.name if ST3 else self.thread.name.decode('utf8')))
+        sublime.set_timeout(lambda: self.progress_bar(i, dir), 100)
+        if self._current_res and sublime.active_window().active_view().id() == self.view.id():
+            entries = [self._format_res(res) for res in self._current_res]
+            sublime.set_timeout(lambda: self.window.show_quick_panel(entries, self._on_panel_selection), 0)
+        return
+
+    def parse_link(self, line):
         match_link = self.LINK_PATTERN.search(line)
         match_md   = self.MD_LINK.search(line)
         match_wiki = self.WIKI_LINK.search(line)
@@ -619,19 +686,7 @@ class PlainTasksOpenLinkCommand(sublime_plugin.TextCommand):
             fn   = (fn.replace('\\[', '[').replace('\\]', ']'))
             if text:
                 text = (text.replace('\\[', '[').replace('\\]', ']'))
-        if fn:
-            self.show_panel_or_open(fn, sym, line, col, text)
-            if text:
-                sublime.set_timeout(lambda: self.find_text(self.opened_file, text, line), 300)
-        else:
-            sublime.status_message('Line does not contain a valid link to file')
-
-    def find_text(self, view, text, line):
-        result = view.find(text, view.sel()[0].a if line else 0, sublime.LITERAL)
-        view.sel().clear()
-        view.sel().add(result.a)
-        view.set_viewport_position(view.text_to_layout(view.size()), False)
-        view.show_at_center(result)
+        return fn, sym, line, col, text
 
 
 class PlainTasksSortByDate(PlainTasksBase):
