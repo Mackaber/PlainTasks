@@ -627,7 +627,8 @@ class PlainTasksOpenLinkCommand(sublime_plugin.TextCommand):
             return
 
         self.window = win = sublime.active_window()
-        self._current_res = [('Stop search', 'Esc to refresh list while search is running', '', '')]
+        self._current_res = [('Stop search', '', '', '')]
+        self.items = 0  # init value to update quick panel
         if sym:
             for name, _, pos in win.lookup_symbol_in_index(sym):
                 if name.endswith(fn):
@@ -662,8 +663,12 @@ class PlainTasksOpenLinkCommand(sublime_plugin.TextCommand):
                              (' ' * before, ' ' * after, self.thread.name if ST3 else self.thread.name.decode('utf8')))
         sublime.set_timeout(lambda: self.progress_bar(i, dir), 100)
         if self._current_res and sublime.active_window().active_view().id() == self.view.id():
+            items = len(self._current_res)
+            if items != self.items:
+                self.window.run_command('hide_overlay')
             entries = [self._format_res(res) for res in self._current_res]
             sublime.set_timeout(lambda: self.window.show_quick_panel(entries, self._on_panel_selection), 0)
+            self.items = items
         return
 
     def parse_link(self, line):
